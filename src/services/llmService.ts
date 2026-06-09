@@ -1,32 +1,25 @@
 import OpenAI from "openai";
 import { env } from "../config/env";
-import { ConversationMessage, LlmResult } from "../types";
+import { LlmResult } from "../types";
 
-const client = new OpenAI({ apiKey: env.OPENAI_API_KEY });
+const client = new OpenAI({
+  apiKey: env.OPENAI_API_KEY,
+  timeout: env.LLM_TIMEOUT_MS,
+  maxRetries: 2
+});
 
 export class LLMService {
-  async generateReply(conversationContext: ConversationMessage[], userMessage: string): Promise<LlmResult> {
+  async generateReply(userMessage: string, ragContext?: string): Promise<LlmResult> {
     const start = Date.now();
 
-    const contextMessages = conversationContext.map((msg) => ({
-      role: msg.direction === "inbound" ? "user" : "assistant",
-      content: msg.text
-    })) as Array<{ role: "user" | "assistant"; content: string }>;
+    const systemContent = ragContext
+      ? `${env.SYSTEM_PROMPT}\n\n[BASE DE CONHECIMENTO]\n${ragContext}\n[FIM DA BASE DE CONHECIMENTO]\n\nUse as informações acima para responder. Seja direto e objetivo. Se a informação não estiver na base de conhecimento, responda com o que sabe sobre os produtos DWEBNET.`
+      : env.SYSTEM_PROMPT;
 
-    const response = await client.chat.completions.create(
-      {
-        model: env.OPENAI_MODEL,
-        messages: [
-          { role: "system", content: env.SYSTEM_PROMPT },
-          ...contextMessages,
-          { role: "user", content: userMessage }
-        ]
-      },
-      {
-        timeout: env.LLM_TIMEOUT_MS,
-        maxRetries: 2
-      }
-    );
+    const response = await client.chat.completions.create({
+      model: env.OPENAI_MODEL,
+      messages: [{ role: "system", content: systemContent }, { role: "user", content: userMessage }]
+    });
 
     const text = response.choices[0]?.message?.content?.trim() || "I could not generate a response right now.";
 

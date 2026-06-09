@@ -1,9 +1,32 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getConversationContext = exports.insertOutboundMessage = exports.insertInboundMessage = exports.getOrCreateOpenConversation = exports.upsertContact = exports.recordWebhookEventIfNew = void 0;
+exports.insertOutboundMessage = exports.insertInboundMessage = exports.getOrCreateActiveSession = exports.upsertCustomer = exports.recordWebhookEventIfNew = void 0;
 const db_1 = require("./db");
+const TABLES = {
+    customers: "BotWpp - customers",
+    sessions: "BotWpp - sessions",
+    messages: "BotWpp - messages",
+    webhookEvents: "BotWpp - webhook_events"
+};
+const SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
+const toIsoTimestamp = (timestamp) => {
+    if (/^\d+$/.test(timestamp)) {
+        return new Date(Number(timestamp) * 1000).toISOString();
+    }
+    return timestamp;
+};
+const getOutboundMessageId = (payload) => {
+    if (!payload || typeof payload !== "object") {
+        return undefined;
+    }
+    const messages = payload.messages;
+    const id = messages?.[0]?.id;
+    return typeof id === "string" && id.length > 0 ? id : undefined;
+};
 const recordWebhookEventIfNew = async (eventKey, payload) => {
-    const { error } = await db_1.supabase.from("webhook_events").insert({ event_key: eventKey, payload_json: payload });
+    const { error } = await db_1.supabase
+        .from(TABLES.webhookEvents)
+        .insert({ event_key: eventKey, payload_json: payload });
     if (!error) {
         return true;
     }
@@ -13,89 +36,100 @@ const recordWebhookEventIfNew = async (eventKey, payload) => {
     throw error;
 };
 exports.recordWebhookEventIfNew = recordWebhookEventIfNew;
-const upsertContact = async (waId, profileName) => {
+const upsertCustomer = async (phoneNumber, whatsappName) => {
     const { data, error } = await db_1.supabase
-        .from("contacts")
-        .upsert({ wa_id: waId, profile_name: profileName }, { onConflict: "wa_id" })
-        .select("id")
+        .from(TABLES.customers)
+        .upsert({
+        phone_number: phoneNumber,
+        whatsapp_name: whatsappName,
+        updated_at: new Date().toISOString()
+    }, { onConflict: "phone_number" })
+        .select("phone_number")
         .single();
     if (error || !data) {
-        throw error ?? new Error("Unable to upsert contact");
+        throw error ?? new Error("Unable to upsert customer");
     }
-    return data.id;
+    return data.phone_number;
 };
-exports.upsertContact = upsertContact;
-const getOrCreateOpenConversation = async (contactId) => {
+exports.upsertCustomer = upsertCustomer;
+const getOrCreateActiveSession = async (phoneNumber, lastUserMessageAt) => {
+    const messageAt = toIsoTimestamp(lastUserMessageAt);
+    const now = Date.now();
     const { data: existing, error: selectError } = await db_1.supabase
-        .from("conversations")
-        .select("id")
-        .eq("contact_id", contactId)
-        .eq("status", "open")
-        .order("created_at", { ascending: false })
+        .from(TABLES.sessions)
+        .select("session_id, last_user_message_at")
+        .eq("phone_number", phoneNumber)
+        .eq("status", "active")
+        .order("last_user_message_at", { ascending: false })
         .limit(1)
         .maybeSingle();
     if (selectError) {
         throw selectError;
     }
-    if (existing?.id) {
-        return existing.id;
+    if (existing?.session_id) {
+        const lastMessageTime = new Date(existing.last_user_message_at).getTime();
+        const isInsideCustomerServiceWindow = now - lastMessageTime < SESSION_WINDOW_MS;
+        if (isInsideCustomerServiceWindow) {
+            const { error: updateError } = await db_1.supabase
+                .from(TABLES.sessions)
+                .update({ last_user_message_at: messageAt, updated_at: new Date().toISOString() })
+                .eq("session_id", existing.session_id);
+            if (updateError) {
+                throw updateError;
+            }
+            return existing.session_id;
+        }
+        const { error: closeError } = await db_1.supabase
+            .from(TABLES.sessions)
+            .update({ status: "closed", updated_at: new Date().toISOString() })
+            .eq("session_id", existing.session_id);
+        if (closeError) {
+            throw closeError;
+        }
     }
     const { data: created, error: insertError } = await db_1.supabase
-        .from("conversations")
-        .insert({ contact_id: contactId, status: "open" })
-        .select("id")
+        .from(TABLES.sessions)
+        .insert({
+        phone_number: phoneNumber,
+        last_user_message_at: messageAt,
+        status: "active"
+    })
+        .select("session_id")
         .single();
     if (insertError || !created) {
-        throw insertError ?? new Error("Unable to create conversation");
+        throw insertError ?? new Error("Unable to create session");
     }
-    return created.id;
+    return created.session_id;
 };
-exports.getOrCreateOpenConversation = getOrCreateOpenConversation;
-const insertInboundMessage = async (conversationId, normalized) => {
-    const { error } = await db_1.supabase.from("messages").insert({
-        conversation_id: conversationId,
-        direction: "inbound",
-        wa_message_id: normalized.waMessageId,
-        text: normalized.textBody,
-        payload_json: normalized.rawPayload,
-        llm_metadata_json: null
+exports.getOrCreateActiveSession = getOrCreateActiveSession;
+const insertInboundMessage = async (sessionId, normalized) => {
+    const { error } = await db_1.supabase.from(TABLES.messages).insert({
+        message_id: normalized.waMessageId,
+        session_id: sessionId,
+        role: "user",
+        content: normalized.textBody,
+        raw_payload: normalized.rawPayload,
+        llm_metadata_json: null,
+        created_at: toIsoTimestamp(normalized.timestamp)
     });
     if (error) {
         throw error;
     }
 };
 exports.insertInboundMessage = insertInboundMessage;
-const insertOutboundMessage = async (conversationId, text, llmMetadata, rawPayload) => {
-    const { error } = await db_1.supabase.from("messages").insert({
-        conversation_id: conversationId,
-        direction: "outbound",
-        wa_message_id: null,
-        text,
-        payload_json: rawPayload,
+const insertOutboundMessage = async (sessionId, text, llmMetadata, rawPayload) => {
+    const outboundMessageId = getOutboundMessageId(rawPayload);
+    const row = {
+        ...(outboundMessageId ? { message_id: outboundMessageId } : {}),
+        session_id: sessionId,
+        role: "assistant",
+        content: text,
+        raw_payload: rawPayload,
         llm_metadata_json: llmMetadata
-    });
+    };
+    const { error } = await db_1.supabase.from(TABLES.messages).insert(row);
     if (error) {
         throw error;
     }
 };
 exports.insertOutboundMessage = insertOutboundMessage;
-const getConversationContext = async (conversationId, limit) => {
-    const { data, error } = await db_1.supabase
-        .from("messages")
-        .select("direction, text, created_at")
-        .eq("conversation_id", conversationId)
-        .order("created_at", { ascending: false })
-        .limit(limit);
-    if (error) {
-        throw error;
-    }
-    const messages = (data ?? [])
-        .filter((row) => typeof row.text === "string" && row.text.length > 0)
-        .map((row) => ({
-        direction: row.direction,
-        text: row.text,
-        created_at: row.created_at
-    }));
-    return messages.reverse();
-};
-exports.getConversationContext = getConversationContext;

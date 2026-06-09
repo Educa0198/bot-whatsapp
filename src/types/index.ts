@@ -9,12 +9,6 @@ export type NormalizedInboundMessage = {
   rawPayload: unknown;
 };
 
-export type ConversationMessage = {
-  direction: "inbound" | "outbound";
-  text: string;
-  created_at: string;
-};
-
 export type LlmResult = {
   text: string;
   metadata: {

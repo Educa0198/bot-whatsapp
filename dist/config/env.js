@@ -18,8 +18,11 @@ const EnvSchema = zod_1.z.object({
     SUPABASE_SERVICE_ROLE_KEY: zod_1.z.string().min(1),
     OPENAI_API_KEY: zod_1.z.string().min(1),
     OPENAI_MODEL: zod_1.z.string().default("gpt-4.1-mini"),
-    SYSTEM_PROMPT: zod_1.z.string().default("You are a helpful WhatsApp assistant."),
-    CONTEXT_MESSAGE_LIMIT: zod_1.z.coerce.number().int().positive().default(10),
-    LLM_TIMEOUT_MS: zod_1.z.coerce.number().int().positive().default(20000)
+    SYSTEM_PROMPT: zod_1.z.string().default("Você é um chatbot para o whatsapp, que responde pela empresa NetMaisBeneficios. A empresa possui diversas soluções e benefícios. os mais comuns sendo VtInteligente, Tele medicina, Nr1, gestão de Frota, tele psicologia."),
+    LLM_TIMEOUT_MS: zod_1.z.coerce.number().int().positive().default(20000),
+    RAG_BASE_URL: zod_1.z.string().url().default("http://localhost:3100"),
+    RAG_API_KEY: zod_1.z.string().min(1),
+    RAG_TOP_K: zod_1.z.coerce.number().int().positive().default(4),
+    RAG_TIMEOUT_MS: zod_1.z.coerce.number().int().positive().default(5000)
 });
 exports.env = EnvSchema.parse(process.env);
